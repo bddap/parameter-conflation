@@ -5,6 +5,9 @@ A VirtualParameterMap holds M actual parameters and can produce N >> M virtual
 parameters on the fly via a deterministic, differentiable mapping function f.
 
 The mapping function is a swappable strategy — subclasses implement get_virtual().
+
+CONTRACT: subclasses should produce virtual params with approximately unit
+variance when actual_params have unit variance. The layers handle Kaiming scaling.
 """
 
 import torch
@@ -28,8 +31,10 @@ class VirtualParameterMap(ABC, nn.Module):
     virtual params for the same actual params).
     """
 
-    def __init__(self, num_actual: int, init_std: float = 0.02):
+    def __init__(self, num_actual: int, init_std: float = 1.0):
         super().__init__()
+        if num_actual < 1:
+            raise ValueError(f"num_actual must be >= 1, got {num_actual}")
         self.num_actual = num_actual
         self.actual_params = nn.Parameter(torch.randn(num_actual) * init_std)
 
@@ -46,16 +51,13 @@ class VirtualParameterMap(ABC, nn.Module):
         Returns:
             Tensor of the requested shape, computed from self.actual_params.
             Must be differentiable w.r.t. self.actual_params.
+            Should have approximately unit variance when actual_params has unit variance.
         """
         ...
 
     def get_virtual(self, shape: Tuple[int, ...], slot_id: int) -> torch.Tensor:
         """Public API: materialize virtual params for a given slot."""
         return self._compute_virtual(shape, slot_id)
-
-    def num_virtual_possible(self) -> str:
-        """Human-readable description of virtual param capacity."""
-        return "depends on mapping"
 
     def extra_repr(self) -> str:
         return f"num_actual={self.num_actual}"

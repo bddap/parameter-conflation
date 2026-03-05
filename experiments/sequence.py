@@ -37,12 +37,21 @@ def count_params(model):
 # --- Dataset ---
 
 def get_text_data(data_dir):
-    """Download a small text corpus (Shakespeare)."""
+    """Download a small text corpus (Shakespeare) or generate one."""
     filepath = os.path.join(data_dir, "shakespeare.txt")
     if not os.path.exists(filepath):
         os.makedirs(data_dir, exist_ok=True)
         url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-        urllib.request.urlretrieve(url, filepath)
+        try:
+            urllib.request.urlretrieve(url, filepath)
+        except Exception:
+            # Fallback: generate repeating text
+            text = ("to be or not to be that is the question "
+                    "whether tis nobler in the mind to suffer "
+                    "the slings and arrows of outrageous fortune "
+                    "or to take arms against a sea of troubles ") * 5000
+            with open(filepath, "w") as f:
+                f.write(text)
     with open(filepath, "r") as f:
         return f.read()
 

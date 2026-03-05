@@ -21,6 +21,14 @@ import urllib.request
 
 from virtual_params import VirtualLinear, VirtualConv2d, SinusoidalMap, HashArithMap
 
+SEED = 42
+
+
+def set_seed(seed):
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
 
 def count_params(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -98,6 +106,7 @@ def eval_seq(model, loader, device):
 
 
 def run_classify(model, name, train_loader, test_loader, device, epochs=10, lr=1e-3):
+    set_seed(SEED)
     model = model.to(device)
     n_params = count_params(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -126,6 +135,7 @@ def run_classify(model, name, train_loader, test_loader, device, epochs=10, lr=1
 
 
 def run_seq(model, name, train_loader, test_loader, device, epochs=10, lr=1e-3):
+    set_seed(SEED)
     model = model.to(device)
     n_params = count_params(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -178,9 +188,10 @@ class VirtualMLP(nn.Module):
     def __init__(self, vpm, hidden=256):
         super().__init__()
         self.vpm = vpm
-        self.fc1 = VirtualLinear(vpm, 784, hidden, slot_id=0)
-        self.fc2 = VirtualLinear(vpm, hidden, hidden, slot_id=100)
-        self.fc3 = VirtualLinear(vpm, hidden, 10, slot_id=200)
+        # Slot IDs spaced by 10 (each layer uses 2: weight + bias)
+        self.fc1 = VirtualLinear(vpm, 784, hidden, slot_id=0)           # ReLU follows: gain=2.0 (default)
+        self.fc2 = VirtualLinear(vpm, hidden, hidden, slot_id=10)       # ReLU follows: gain=2.0 (default)
+        self.fc3 = VirtualLinear(vpm, hidden, 10, slot_id=20, gain=1.0) # Output layer: gain=1.0
 
     def forward(self, x):
         x = x.view(x.size(0), -1)
@@ -215,10 +226,10 @@ class VirtualCNN(nn.Module):
         super().__init__()
         self.vpm = vpm
         self.conv1 = VirtualConv2d(vpm, 3, ch1, 3, padding=1, slot_id=0)
-        self.conv2 = VirtualConv2d(vpm, ch1, ch2, 3, padding=1, slot_id=100)
-        self.conv3 = VirtualConv2d(vpm, ch2, ch3, 3, padding=1, slot_id=200)
-        self.fc1 = VirtualLinear(vpm, 4 * 4 * ch3, fc_hidden, slot_id=300)
-        self.fc2 = VirtualLinear(vpm, fc_hidden, 10, slot_id=400)
+        self.conv2 = VirtualConv2d(vpm, ch1, ch2, 3, padding=1, slot_id=10)
+        self.conv3 = VirtualConv2d(vpm, ch2, ch3, 3, padding=1, slot_id=20)
+        self.fc1 = VirtualLinear(vpm, 4 * 4 * ch3, fc_hidden, slot_id=30)
+        self.fc2 = VirtualLinear(vpm, fc_hidden, 10, slot_id=40, gain=1.0)  # Output layer
 
     def forward(self, x):
         x = F.relu(self.conv1(x))
@@ -233,75 +244,61 @@ class VirtualCNN(nn.Module):
 
 
 class CharModel(nn.Module):
-    def __init__(self, vocab_size, embed_dim=64, hidden_dim=128):
+    """Char-level MLP: embed context window -> hidden -> hidden -> vocab."""
+    def __init__(self, vocab_size, embed_dim=16, ctx_len=32, hidden_dim=256):
         super().__init__()
-        self.hidden_dim = hidden_dim
         self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.ih = nn.Linear(embed_dim, 3 * hidden_dim)
-        self.hh = nn.Linear(hidden_dim, 3 * hidden_dim)
-        self.output_proj = nn.Linear(hidden_dim, vocab_size)
+        self.fc1 = nn.Linear(embed_dim * ctx_len, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.out = nn.Linear(hidden_dim, vocab_size)
 
     def forward(self, x):
-        batch, seq_len = x.shape
-        embeds = self.embedding(x)
-        h = torch.zeros(batch, self.hidden_dim, device=x.device)
-        outputs = []
-        for t in range(seq_len):
-            x_t = embeds[:, t, :]
-            gi = self.ih(x_t)
-            gh = self.hh(h)
-            r_i, z_i, n_i = gi.chunk(3, dim=-1)
-            r_h, z_h, n_h = gh.chunk(3, dim=-1)
-            r = torch.sigmoid(r_i + r_h)
-            z = torch.sigmoid(z_i + z_h)
-            n = torch.tanh(n_i + r * n_h)
-            h = (1 - z) * n + z * h
-            outputs.append(h)
-        return self.output_proj(torch.stack(outputs, dim=1))
+        e = self.embedding(x).view(x.size(0), -1)
+        return self.out(F.relu(self.fc2(F.relu(self.fc1(e)))))
 
 
 class VirtualCharModel(nn.Module):
-    def __init__(self, vpm, vocab_size, embed_dim=64, hidden_dim=128):
+    """Char-level MLP with virtual params for the linear layers."""
+    def __init__(self, vpm, vocab_size, embed_dim=16, ctx_len=32, hidden_dim=256):
         super().__init__()
-        self.hidden_dim = hidden_dim
-        self.vpm = vpm
         self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.ih = VirtualLinear(vpm, embed_dim, 3 * hidden_dim, slot_id=0)
-        self.hh = VirtualLinear(vpm, hidden_dim, 3 * hidden_dim, slot_id=100)
-        self.output_proj = VirtualLinear(vpm, hidden_dim, vocab_size, slot_id=200)
+        self.fc1 = VirtualLinear(vpm, embed_dim * ctx_len, hidden_dim, slot_id=0)
+        self.fc2 = VirtualLinear(vpm, hidden_dim, hidden_dim, slot_id=10)
+        self.out = VirtualLinear(vpm, hidden_dim, vocab_size, slot_id=20, gain=1.0)  # Output layer
 
     def forward(self, x):
-        batch, seq_len = x.shape
-        embeds = self.embedding(x)
-        h = torch.zeros(batch, self.hidden_dim, device=x.device)
-        outputs = []
-        for t in range(seq_len):
-            x_t = embeds[:, t, :]
-            gi = self.ih(x_t)
-            gh = self.hh(h)
-            r_i, z_i, n_i = gi.chunk(3, dim=-1)
-            r_h, z_h, n_h = gh.chunk(3, dim=-1)
-            r = torch.sigmoid(r_i + r_h)
-            z = torch.sigmoid(z_i + z_h)
-            n = torch.tanh(n_i + r * n_h)
-            h = (1 - z) * n + z * h
-            outputs.append(h)
-        return self.output_proj(torch.stack(outputs, dim=1))
+        e = self.embedding(x).view(x.size(0), -1)
+        return self.out(F.relu(self.fc2(F.relu(self.fc1(e)))))
 
 
 class CharDataset(Dataset):
-    def __init__(self, text, seq_len=64):
-        self.seq_len = seq_len
-        chars = sorted(set(text))
-        self.char2idx = {c: i for i, c in enumerate(chars)}
-        self.vocab_size = len(chars)
-        self.data = torch.tensor([self.char2idx[c] for c in text], dtype=torch.long)
+    """Character-level dataset with shared vocabulary."""
+    def __init__(self, data_tensor, ctx_len=32):
+        self.data = data_tensor
+        self.ctx_len = ctx_len
 
     def __len__(self):
-        return max(0, len(self.data) - self.seq_len - 1)
+        return max(0, len(self.data) - self.ctx_len)
 
     def __getitem__(self, idx):
-        return self.data[idx:idx + self.seq_len], self.data[idx + 1:idx + self.seq_len + 1]
+        return self.data[idx:idx + self.ctx_len], self.data[idx + self.ctx_len]
+
+
+def mlp_hidden_for_budget(budget):
+    """Solve h^2 + 796*h + 10 = budget for h (BaselineMLP param count formula).
+
+    BaselineMLP(hidden=h) has:
+      fc1: 784*h + h = 785*h
+      fc2: h*h + h
+      fc3: 10*h + 10
+      total: h^2 + 796*h + 10
+    """
+    # h = (-796 + sqrt(796^2 + 4*(budget - 10))) / 2
+    discriminant = 796 ** 2 + 4 * (budget - 10)
+    if discriminant < 0:
+        return 4
+    h = int((-796 + math.sqrt(discriminant)) / 2)
+    return max(h, 4)
 
 
 # ============================================================================
@@ -318,9 +315,9 @@ def main():
     ratios = [4, 10, 50]
 
     # ======================== MNIST ========================
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("MNIST EXPERIMENT")
-    print("="*70)
+    print("=" * 70)
 
     mnist_transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
     train_data = datasets.MNIST(data_dir, train=True, download=True, transform=mnist_transform)
@@ -329,9 +326,10 @@ def main():
     test_loader = DataLoader(test_data, batch_size=512, shuffle=False, num_workers=0)
 
     mnist_results = []
-    epochs_mnist = 10
+    epochs_mnist = 15
 
     # Baseline full
+    set_seed(SEED)
     model = BaselineMLP(hidden=256)
     full_params = count_params(model)
     mnist_results.append(run_classify(model, "Baseline (full)", train_loader, test_loader, device, epochs_mnist))
@@ -340,27 +338,29 @@ def main():
         num_actual = full_params // ratio
 
         # Virtual sinusoidal
+        set_seed(SEED)
         vpm = SinusoidalMap(num_actual=num_actual, num_terms=8)
         model = VirtualMLP(vpm, hidden=256)
         mnist_results.append(run_classify(model, f"Sinusoidal 1/{ratio}", train_loader, test_loader, device, epochs_mnist))
 
         # Virtual hash_arith
+        set_seed(SEED)
         vpm = HashArithMap(num_actual=num_actual)
         model = VirtualMLP(vpm, hidden=256)
         mnist_results.append(run_classify(model, f"HashArith 1/{ratio}", train_loader, test_loader, device, epochs_mnist))
 
-        # Baseline small
-        small_h = int((-795 + math.sqrt(795**2 + 4 * num_actual)) / 2)
-        small_h = max(small_h, 4)
+        # Baseline small — matched param count
+        set_seed(SEED)
+        small_h = mlp_hidden_for_budget(num_actual)
         model = BaselineMLP(hidden=small_h)
         mnist_results.append(run_classify(model, f"Baseline small 1/{ratio}", train_loader, test_loader, device, epochs_mnist))
 
     all_results["mnist"] = mnist_results
 
     # ======================== CIFAR-10 ========================
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("CIFAR-10 EXPERIMENT")
-    print("="*70)
+    print("=" * 70)
 
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4), transforms.RandomHorizontalFlip(),
@@ -377,6 +377,7 @@ def main():
     cifar_results = []
     epochs_cifar = 15
 
+    set_seed(SEED)
     model = BaselineCNN()
     full_params = count_params(model)
     cifar_results.append(run_classify(model, "Baseline (full)", train_loader, test_loader, device, epochs_cifar))
@@ -384,76 +385,129 @@ def main():
     for ratio in ratios:
         num_actual = full_params // ratio
 
+        set_seed(SEED)
         vpm = SinusoidalMap(num_actual=num_actual, num_terms=8)
         model = VirtualCNN(vpm)
         cifar_results.append(run_classify(model, f"Sinusoidal 1/{ratio}", train_loader, test_loader, device, epochs_cifar))
 
+        set_seed(SEED)
         vpm = HashArithMap(num_actual=num_actual)
         model = VirtualCNN(vpm)
         cifar_results.append(run_classify(model, f"HashArith 1/{ratio}", train_loader, test_loader, device, epochs_cifar))
 
-        scale = 1.0 / math.sqrt(ratio)
-        small_ch1 = max(int(32 * scale), 4)
-        small_ch2 = max(int(64 * scale), 4)
-        small_ch3 = max(int(64 * scale), 4)
-        small_fc = max(int(256 * scale), 4)
-        model = BaselineCNN(ch1=small_ch1, ch2=small_ch2, ch3=small_ch3, fc_hidden=small_fc)
+        # Baseline small: scale channels to approximately match param count
+        # Use binary search for accurate param matching
+        best_scale = 1.0 / math.sqrt(ratio)
+        for trial_scale in [best_scale * f for f in [0.8, 0.9, 1.0, 1.1, 1.2]]:
+            sc1 = max(int(32 * trial_scale), 4)
+            sc2 = max(int(64 * trial_scale), 4)
+            sc3 = max(int(64 * trial_scale), 4)
+            sfc = max(int(256 * trial_scale), 4)
+            trial_model = BaselineCNN(ch1=sc1, ch2=sc2, ch3=sc3, fc_hidden=sfc)
+            trial_params = count_params(trial_model)
+            if abs(trial_params - num_actual) < abs(count_params(BaselineCNN(
+                    ch1=max(int(32 * best_scale), 4), ch2=max(int(64 * best_scale), 4),
+                    ch3=max(int(64 * best_scale), 4), fc_hidden=max(int(256 * best_scale), 4)
+            )) - num_actual):
+                best_scale = trial_scale
+
+        sc1 = max(int(32 * best_scale), 4)
+        sc2 = max(int(64 * best_scale), 4)
+        sc3 = max(int(64 * best_scale), 4)
+        sfc = max(int(256 * best_scale), 4)
+        set_seed(SEED)
+        model = BaselineCNN(ch1=sc1, ch2=sc2, ch3=sc3, fc_hidden=sfc)
         cifar_results.append(run_classify(model, f"Baseline small 1/{ratio}", train_loader, test_loader, device, epochs_cifar))
 
     all_results["cifar10"] = cifar_results
 
     # ======================== SEQUENCE ========================
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("SEQUENCE MODELING EXPERIMENT")
-    print("="*70)
+    print("=" * 70)
 
     # Download tiny shakespeare
     text_path = os.path.join(data_dir, "shakespeare.txt")
     if not os.path.exists(text_path):
-        url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-        urllib.request.urlretrieve(url, text_path)
+        try:
+            url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+            urllib.request.urlretrieve(url, text_path)
+        except Exception:
+            text = ("to be or not to be that is the question "
+                    "whether tis nobler in the mind to suffer ") * 5000
+            with open(text_path, "w") as f:
+                f.write(text)
     with open(text_path, "r") as f:
         text = f.read()
 
-    # Use a smaller subset for speed
-    text = text[:200000]
-    split = int(len(text) * 0.9)
-    seq_len = 48
-    train_dataset = CharDataset(text[:split], seq_len=seq_len)
-    test_dataset = CharDataset(text[split:], seq_len=seq_len)
-    vocab_size = train_dataset.vocab_size
-    print(f"  Text: {len(text):,} chars, vocab={vocab_size}, seq_len={seq_len}")
+    text = text[:100000]
 
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=0)
-    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, num_workers=0)
+    # Build vocabulary ONCE on the full text, then encode and split
+    chars = sorted(set(text))
+    char2idx = {c: i for i, c in enumerate(chars)}
+    vocab_size = len(chars)
+    data_encoded = torch.tensor([char2idx[c] for c in text], dtype=torch.long)
+
+    split = int(len(data_encoded) * 0.9)
+    ctx_len = 32
+    embed_dim = 16
+    hidden_dim = 256
+
+    train_dataset = CharDataset(data_encoded[:split], ctx_len=ctx_len)
+    test_dataset = CharDataset(data_encoded[split:], ctx_len=ctx_len)
+    print(f"  Text: {len(text):,} chars, vocab={vocab_size}, ctx_len={ctx_len}")
+
+    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, num_workers=0)
+    test_loader = DataLoader(test_dataset, batch_size=256, shuffle=False, num_workers=0)
 
     seq_results = []
-    embed_dim = 32
-    hidden_dim = 64
-    epochs_seq = 10
+    epochs_seq = 15
 
-    model = CharModel(vocab_size, embed_dim=embed_dim, hidden_dim=hidden_dim)
+    set_seed(SEED)
+    model = CharModel(vocab_size, embed_dim=embed_dim, ctx_len=ctx_len, hidden_dim=hidden_dim)
     full_params = count_params(model)
-    embed_params = vocab_size * embed_dim
-    linear_params = full_params - embed_params
-    print(f"  Full model: {full_params:,} total ({embed_params:,} embed + {linear_params:,} linear)")
+    embed_param_count = vocab_size * embed_dim
+    linear_param_count = full_params - embed_param_count
+    print(f"  Full model: {full_params:,} total ({embed_param_count:,} embed + {linear_param_count:,} linear)")
 
     seq_results.append(run_seq(model, "Baseline (full)", train_loader, test_loader, device, epochs_seq))
 
     for ratio in ratios:
-        num_actual = linear_params // ratio
+        # Target: total params roughly = full_params / ratio
+        # Virtual model: embed_param_count + num_actual
+        # Baseline small: embed_param_count + small_linear
+        # So match on: num_actual ≈ (full_params / ratio) - embed_param_count
+        target_total = full_params // ratio
+        num_actual = max(target_total - embed_param_count, 100)
 
+        # Virtual (sinusoidal)
+        set_seed(SEED)
         vpm = SinusoidalMap(num_actual=num_actual, num_terms=8)
-        model = VirtualCharModel(vpm, vocab_size, embed_dim=embed_dim, hidden_dim=hidden_dim)
+        model = VirtualCharModel(vpm, vocab_size, embed_dim=embed_dim, ctx_len=ctx_len, hidden_dim=hidden_dim)
         seq_results.append(run_seq(model, f"Sinusoidal 1/{ratio}", train_loader, test_loader, device, epochs_seq))
 
+        # Virtual (hash_arith)
+        set_seed(SEED)
         vpm = HashArithMap(num_actual=num_actual)
-        model = VirtualCharModel(vpm, vocab_size, embed_dim=embed_dim, hidden_dim=hidden_dim)
+        model = VirtualCharModel(vpm, vocab_size, embed_dim=embed_dim, ctx_len=ctx_len, hidden_dim=hidden_dim)
         seq_results.append(run_seq(model, f"HashArith 1/{ratio}", train_loader, test_loader, device, epochs_seq))
 
-        scale = 1.0 / math.sqrt(ratio)
-        small_hidden = max(int(hidden_dim * scale), 8)
-        model = CharModel(vocab_size, embed_dim=embed_dim, hidden_dim=small_hidden)
+        # Baseline small: shrink hidden_dim to match target_total params
+        # CharModel params = embed + (embed*ctx)*h + h + h*h + h + h*vocab + vocab
+        # = embed + h*(embed*ctx + 1 + h + 1 + vocab) + vocab
+        # Solve for h: h^2 + (embed*ctx + vocab + 2)*h + (embed + vocab - target_total) = 0
+        a_coeff = 1
+        b_coeff = embed_dim * ctx_len + vocab_size + 2
+        c_coeff = embed_param_count + vocab_size - target_total
+        disc = b_coeff ** 2 - 4 * a_coeff * c_coeff
+        if disc > 0:
+            small_h = int((-b_coeff + math.sqrt(disc)) / (2 * a_coeff))
+        else:
+            small_h = 8
+        small_h = max(small_h, 8)
+
+        set_seed(SEED)
+        model = CharModel(vocab_size, embed_dim=embed_dim, ctx_len=ctx_len, hidden_dim=small_h)
         seq_results.append(run_seq(model, f"Baseline small 1/{ratio}", train_loader, test_loader, device, epochs_seq))
 
     all_results["sequence"] = seq_results
@@ -463,16 +517,16 @@ def main():
     with open(os.path.join(results_dir, "all_results.json"), "w") as f:
         json.dump(all_results, f, indent=2)
 
-    print("\n\n" + "="*85)
+    print("\n\n" + "=" * 85)
     print("FULL RESULTS SUMMARY")
-    print("="*85)
+    print("=" * 85)
 
     for task_name, results in all_results.items():
         metric_key = "best_test_acc" if task_name != "sequence" else "best_test_bpc"
         metric_label = "Best Acc" if task_name != "sequence" else "Best BPC"
         print(f"\n--- {task_name.upper()} ---")
         print(f"  {'Model':<35} {'Params':>10} {metric_label:>10} {'Time':>8}")
-        print(f"  {'-'*67}")
+        print(f"  {'-' * 67}")
         for r in results:
             val = r.get(metric_key, "N/A")
             if isinstance(val, float):

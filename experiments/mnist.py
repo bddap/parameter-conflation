@@ -21,7 +21,6 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import time
 import json
-import math
 
 from virtual_params import VirtualLinear, SinusoidalMap, HashArithMap
 
@@ -203,6 +202,7 @@ def main():
         # Find hidden size that gives ~num_actual params
         # params ≈ 784*h + h + h*h + h + h*10 + 10 = h*(784+h+11) + h + 10
         # Solve approximately
+        import math
         small_h = int((-795 + math.sqrt(795**2 + 4 * num_actual)) / 2)
         small_h = max(small_h, 4)
         model = BaselineMLP(hidden=small_h)
