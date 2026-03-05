@@ -7,6 +7,7 @@ epoch counts for CPU feasibility. Produces a unified results summary.
 
 import sys
 import os
+# TODO: Replace sys.path manipulation with proper package install (pip install -e .)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
@@ -16,10 +17,14 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import datasets, transforms
 import time
 import json
+import logging
 import math
+import urllib.error
 import urllib.request
 
 from virtual_params import VirtualLinear, VirtualConv2d, SinusoidalMap, HashArithMap
+
+logger = logging.getLogger(__name__)
 
 
 def count_params(model):
@@ -413,7 +418,8 @@ def main():
         try:
             url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
             urllib.request.urlretrieve(url, text_path)
-        except Exception:
+        except (urllib.error.URLError, OSError) as e:
+            logger.warning("Failed to download Shakespeare corpus (%s); using synthetic fallback text.", e)
             text = ("to be or not to be that is the question "
                     "whether tis nobler in the mind to suffer ") * 5000
             with open(text_path, "w") as f:
