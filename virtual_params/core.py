@@ -53,8 +53,6 @@ class VirtualParameterMap(ABC, nn.Module):
         """Public API: materialize virtual params for a given slot."""
         return self._compute_virtual(shape, slot_id)
 
-    # TODO: Consider returning int (or math.inf) instead of str — callers may
-    # expect a numeric value.  Kept as-is to avoid breaking subclass overrides.
     def num_virtual_possible(self) -> str:
         """Human-readable description of virtual param capacity."""
         return "depends on mapping"

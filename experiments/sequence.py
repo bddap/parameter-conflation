@@ -16,7 +16,6 @@ Models:
 
 import sys
 import os
-# TODO: Replace sys.path manipulation with proper package install (pip install -e .)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
@@ -25,14 +24,10 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import time
 import json
-import logging
 import math
-import urllib.error
 import urllib.request
 
 from virtual_params import VirtualLinear, SinusoidalMap, HashArithMap
-
-logger = logging.getLogger(__name__)
 
 
 def count_params(model):
@@ -42,22 +37,12 @@ def count_params(model):
 # --- Dataset ---
 
 def get_text_data(data_dir):
-    """Download a small text corpus (Shakespeare) or generate one."""
+    """Download a small text corpus (Shakespeare)."""
     filepath = os.path.join(data_dir, "shakespeare.txt")
     if not os.path.exists(filepath):
         os.makedirs(data_dir, exist_ok=True)
         url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-        try:
-            urllib.request.urlretrieve(url, filepath)
-        except (urllib.error.URLError, OSError) as e:
-            # Fallback: generate repeating text
-            logger.warning("Failed to download Shakespeare corpus (%s); using synthetic fallback text.", e)
-            text = ("to be or not to be that is the question "
-                    "whether tis nobler in the mind to suffer "
-                    "the slings and arrows of outrageous fortune "
-                    "or to take arms against a sea of troubles ") * 5000
-            with open(filepath, "w") as f:
-                f.write(text)
+        urllib.request.urlretrieve(url, filepath)
     with open(filepath, "r") as f:
         return f.read()
 

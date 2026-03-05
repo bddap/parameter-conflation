@@ -12,7 +12,6 @@ All models: 784 -> 256 -> 256 -> 10
 
 import sys
 import os
-# TODO: Replace sys.path manipulation with proper package install (pip install -e .)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch

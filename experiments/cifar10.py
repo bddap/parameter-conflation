@@ -12,7 +12,6 @@ Architecture: Conv(3->32,3) -> Conv(32->64,3) -> Conv(64->64,3) -> FC(1024->256)
 
 import sys
 import os
-# TODO: Replace sys.path manipulation with proper package install (pip install -e .)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
