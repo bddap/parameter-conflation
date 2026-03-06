@@ -3,11 +3,6 @@ Combined experiment runner for parameter conflation.
 
 Runs MNIST, CIFAR-10, and sequence modeling experiments with reduced
 epoch counts for CPU feasibility. Produces a unified results summary.
-
-NOTE: The sequence model here is a feedforward MLP (embed->flatten->hidden->output),
-NOT the GRU-based model in sequence.py. The dataset here predicts the next single
-character from a fixed context window. These are intentionally simpler for speed;
-sequence.py is the full GRU-based experiment.
 """
 
 import sys
@@ -249,44 +244,82 @@ class VirtualCNN(nn.Module):
 
 
 class CharModel(nn.Module):
-    """Char-level MLP: embed context window -> hidden -> hidden -> vocab."""
-    def __init__(self, vocab_size, embed_dim=16, ctx_len=32, hidden_dim=256):
+    """Char-level GRU: embedding -> GRU cell (manual, from Linear layers) -> output.
+
+    Uses a manual GRU cell so that virtual-param version is a fair comparison
+    (same architecture, same ops, just different weight source).
+    """
+    def __init__(self, vocab_size, embed_dim=16, hidden_dim=256):
         super().__init__()
+        self.hidden_dim = hidden_dim
         self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.fc1 = nn.Linear(embed_dim * ctx_len, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.out = nn.Linear(hidden_dim, vocab_size)
+        self.ih = nn.Linear(embed_dim, 3 * hidden_dim)
+        self.hh = nn.Linear(hidden_dim, 3 * hidden_dim)
+        self.output_proj = nn.Linear(hidden_dim, vocab_size)
 
     def forward(self, x):
-        e = self.embedding(x).view(x.size(0), -1)
-        return self.out(F.relu(self.fc2(F.relu(self.fc1(e)))))
+        batch, seq_len = x.shape
+        embeds = self.embedding(x)
+        h = torch.zeros(batch, self.hidden_dim, device=x.device)
+        outputs = []
+        for t in range(seq_len):
+            x_t = embeds[:, t, :]
+            gi = self.ih(x_t)
+            gh = self.hh(h)
+            r_i, z_i, n_i = gi.chunk(3, dim=-1)
+            r_h, z_h, n_h = gh.chunk(3, dim=-1)
+            r = torch.sigmoid(r_i + r_h)
+            z = torch.sigmoid(z_i + z_h)
+            n = torch.tanh(n_i + r * n_h)
+            h = (1 - z) * n + z * h
+            outputs.append(h)
+        h_seq = torch.stack(outputs, dim=1)
+        return self.output_proj(h_seq)
 
 
 class VirtualCharModel(nn.Module):
-    """Char-level MLP with virtual params for the linear layers."""
-    def __init__(self, vpm, vocab_size, embed_dim=16, ctx_len=32, hidden_dim=256):
+    """Same GRU architecture as CharModel but with virtual params for Linear layers."""
+    def __init__(self, vpm, vocab_size, embed_dim=16, hidden_dim=256):
         super().__init__()
+        self.hidden_dim = hidden_dim
         self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.fc1 = VirtualLinear(vpm, embed_dim * ctx_len, hidden_dim, slot_id=0)
-        self.fc2 = VirtualLinear(vpm, hidden_dim, hidden_dim, slot_id=10)
-        self.out = VirtualLinear(vpm, hidden_dim, vocab_size, slot_id=20, gain=1.0)  # Output layer
+        self.ih = VirtualLinear(vpm, embed_dim, 3 * hidden_dim, slot_id=0)
+        self.hh = VirtualLinear(vpm, hidden_dim, 3 * hidden_dim, slot_id=10)
+        self.output_proj = VirtualLinear(vpm, hidden_dim, vocab_size, slot_id=20, gain=1.0)
 
     def forward(self, x):
-        e = self.embedding(x).view(x.size(0), -1)
-        return self.out(F.relu(self.fc2(F.relu(self.fc1(e)))))
+        batch, seq_len = x.shape
+        embeds = self.embedding(x)
+        h = torch.zeros(batch, self.hidden_dim, device=x.device)
+        outputs = []
+        for t in range(seq_len):
+            x_t = embeds[:, t, :]
+            gi = self.ih(x_t)
+            gh = self.hh(h)
+            r_i, z_i, n_i = gi.chunk(3, dim=-1)
+            r_h, z_h, n_h = gh.chunk(3, dim=-1)
+            r = torch.sigmoid(r_i + r_h)
+            z = torch.sigmoid(z_i + z_h)
+            n = torch.tanh(n_i + r * n_h)
+            h = (1 - z) * n + z * h
+            outputs.append(h)
+        h_seq = torch.stack(outputs, dim=1)
+        return self.output_proj(h_seq)
 
 
 class CharDataset(Dataset):
-    """Character-level dataset with shared vocabulary."""
-    def __init__(self, data_tensor, ctx_len=32):
+    """Character-level dataset with shared vocabulary. Returns (x, y) sequences."""
+    def __init__(self, data_tensor, seq_len=32):
         self.data = data_tensor
-        self.ctx_len = ctx_len
+        self.seq_len = seq_len
 
     def __len__(self):
-        return max(0, len(self.data) - self.ctx_len)
+        return max(0, len(self.data) - self.seq_len - 1)
 
     def __getitem__(self, idx):
-        return self.data[idx:idx + self.ctx_len], self.data[idx + self.ctx_len]
+        x = self.data[idx:idx + self.seq_len]
+        y = self.data[idx + 1:idx + self.seq_len + 1]
+        return x, y
 
 
 def mlp_hidden_for_budget(budget):
@@ -448,22 +481,22 @@ def main():
     data_encoded = torch.tensor([char2idx[c] for c in text], dtype=torch.long)
 
     split = int(len(data_encoded) * 0.9)
-    ctx_len = 32
+    seq_len = 32
     embed_dim = 16
-    hidden_dim = 256
+    hidden_dim = 128  # smaller than sequence.py for CPU speed
 
-    train_dataset = CharDataset(data_encoded[:split], ctx_len=ctx_len)
-    test_dataset = CharDataset(data_encoded[split:], ctx_len=ctx_len)
-    print(f"  Text: {len(text):,} chars, vocab={vocab_size}, ctx_len={ctx_len}")
+    train_dataset = CharDataset(data_encoded[:split], seq_len=seq_len)
+    test_dataset = CharDataset(data_encoded[split:], seq_len=seq_len)
+    print(f"  Text: {len(text):,} chars, vocab={vocab_size}, seq_len={seq_len}")
 
-    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, num_workers=0)
-    test_loader = DataLoader(test_dataset, batch_size=256, shuffle=False, num_workers=0)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=0)
+    test_loader = DataLoader(test_dataset, batch_size=128, shuffle=False, num_workers=0)
 
     seq_results = []
     epochs_seq = 15
 
     set_seed(SEED)
-    model = CharModel(vocab_size, embed_dim=embed_dim, ctx_len=ctx_len, hidden_dim=hidden_dim)
+    model = CharModel(vocab_size, embed_dim=embed_dim, hidden_dim=hidden_dim)
     full_params = count_params(model)
     embed_param_count = vocab_size * embed_dim
     linear_param_count = full_params - embed_param_count
@@ -482,22 +515,27 @@ def main():
         # Virtual (sinusoidal)
         set_seed(SEED)
         vpm = SinusoidalMap(num_actual=num_actual, num_terms=8)
-        model = VirtualCharModel(vpm, vocab_size, embed_dim=embed_dim, ctx_len=ctx_len, hidden_dim=hidden_dim)
+        model = VirtualCharModel(vpm, vocab_size, embed_dim=embed_dim, hidden_dim=hidden_dim)
         seq_results.append(run_seq(model, f"Sinusoidal 1/{ratio}", train_loader, test_loader, device, epochs_seq))
 
         # Virtual (hash_arith)
         set_seed(SEED)
         vpm = HashArithMap(num_actual=num_actual)
-        model = VirtualCharModel(vpm, vocab_size, embed_dim=embed_dim, ctx_len=ctx_len, hidden_dim=hidden_dim)
+        model = VirtualCharModel(vpm, vocab_size, embed_dim=embed_dim, hidden_dim=hidden_dim)
         seq_results.append(run_seq(model, f"HashArith 1/{ratio}", train_loader, test_loader, device, epochs_seq))
 
         # Baseline small: shrink hidden_dim to match target_total params
-        # CharModel params = embed + (embed*ctx)*h + h + h*h + h + h*vocab + vocab
-        # = embed + h*(embed*ctx + 1 + h + 1 + vocab) + vocab
-        # Solve for h: h^2 + (embed*ctx + vocab + 2)*h + (embed + vocab - target_total) = 0
-        a_coeff = 1
-        b_coeff = embed_dim * ctx_len + vocab_size + 2
-        c_coeff = embed_param_count + vocab_size - target_total
+        # GRU CharModel params = embed + ih + hh + output_proj
+        #   embed = vocab * embed_dim
+        #   ih = embed_dim * 3h + 3h
+        #   hh = h * 3h + 3h
+        #   output_proj = h * vocab + vocab
+        #   linear = 3h*(embed_dim + h + 2) + vocab*(h + 1)
+        #   total = embed + linear
+        # Solve: 3h^2 + (3*embed_dim + 6 + vocab)*h + (vocab + embed - target_total) = 0
+        a_coeff = 3
+        b_coeff = 3 * embed_dim + 6 + vocab_size
+        c_coeff = vocab_size + embed_param_count - target_total
         disc = b_coeff ** 2 - 4 * a_coeff * c_coeff
         if disc > 0:
             small_h = int((-b_coeff + math.sqrt(disc)) / (2 * a_coeff))
@@ -506,7 +544,7 @@ def main():
         small_h = max(small_h, 8)
 
         set_seed(SEED)
-        model = CharModel(vocab_size, embed_dim=embed_dim, ctx_len=ctx_len, hidden_dim=small_h)
+        model = CharModel(vocab_size, embed_dim=embed_dim, hidden_dim=small_h)
         seq_results.append(run_seq(model, f"Baseline small 1/{ratio}", train_loader, test_loader, device, epochs_seq))
 
     all_results["sequence"] = seq_results
