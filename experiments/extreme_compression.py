@@ -130,17 +130,36 @@ def best_tapered_for_budget(budget, taper_ratio=4):
     With h1 = taper_ratio * h2:
            = taper_ratio*h2*(785 + h2) + h2*11 + 10
            = taper_ratio*h2^2 + (785*taper_ratio + 11)*h2 + 10
+
+    Returns (h1, h2) or None if budget is too small.
     """
     a = taper_ratio
     b = 785 * taper_ratio + 11
     c = 10 - budget
     disc = b**2 - 4 * a * c
     if disc < 0:
-        return 2
+        return None
     h2 = int((-b + math.sqrt(disc)) / (2 * a))
-    h2 = max(h2, 2)
+    if h2 < 2:
+        return None
     h1 = taper_ratio * h2
     return h1, h2
+
+
+def _make_factory(model):
+    """Create a callable that reconstructs a model with the same architecture."""
+    if isinstance(model, MLP1):
+        h = model.fc1.out_features
+        return lambda: MLP1(h)
+    elif isinstance(model, MLP2Tapered):
+        h1 = model.fc1.out_features
+        h2 = model.fc2.out_features
+        return lambda h1=h1, h2=h2: MLP2Tapered(h1, h2)
+    elif isinstance(model, MLP2):
+        h = model.fc1.out_features
+        return lambda h=h: MLP2(h)
+    else:
+        raise ValueError(f"Unknown model type: {type(model)}")
 
 
 def get_baseline_candidates(budget):
@@ -161,19 +180,17 @@ def get_baseline_candidates(budget):
 
     # 2-layer tapered (4:1 ratio)
     result = best_tapered_for_budget(budget, taper_ratio=4)
-    if isinstance(result, tuple):
+    if result is not None:
         h1, h2 = result
-        if h2 >= 2:
-            m = MLP2Tapered(h1, h2)
-            candidates.append((m.arch_name, m, count_params(m)))
+        m = MLP2Tapered(h1, h2)
+        candidates.append((m.arch_name, m, count_params(m)))
 
     # 2-layer tapered (2:1 ratio)
     result = best_tapered_for_budget(budget, taper_ratio=2)
-    if isinstance(result, tuple):
+    if result is not None:
         h1, h2 = result
-        if h2 >= 2:
-            m = MLP2Tapered(h1, h2)
-            candidates.append((m.arch_name, m, count_params(m)))
+        m = MLP2Tapered(h1, h2)
+        candidates.append((m.arch_name, m, count_params(m)))
 
     return candidates
 
@@ -251,7 +268,7 @@ def main():
     train_loader = DataLoader(train_data, batch_size=256, shuffle=True, num_workers=0)
     test_loader = DataLoader(test_data, batch_size=512, shuffle=False, num_workers=0)
 
-    full_params = 269322  # MLP2(256) param count
+    full_params = count_params(MLP2(256))
     epochs = 20
     ratios = [50, 100, 200, 500]
 
@@ -260,6 +277,8 @@ def main():
     print("PHASE 1: Baseline Architecture Search (seed=42)")
     print("=" * 70)
 
+    # Store (result_dict, model_factory) per ratio. model_factory is a callable
+    # that returns a fresh model instance — avoids fragile string parsing.
     best_baselines = {}
     for ratio in ratios:
         budget = full_params // ratio
@@ -267,12 +286,17 @@ def main():
         candidates = get_baseline_candidates(budget)
         best_result = {"name": "None", "num_params": 0, "best_test_acc": 0.0, "last_test_acc": 0.0, "time_s": 0.0}
         best_acc = -1.0
+        best_factory = None
         for name, model, p in candidates:
+            # Capture model class and args for later reconstruction
+            factory = _make_factory(model)
             r = train_model(model, name, train_loader, test_loader, device, epochs, seed=42)
             if r["best_test_acc"] > best_acc:
                 best_acc = r["best_test_acc"]
                 best_result = r
-        best_baselines[ratio] = best_result
+                best_factory = factory
+        assert best_factory is not None, f"No baseline candidates for budget {budget}"
+        best_baselines[ratio] = (best_result, best_factory)
         print(f"  => Winner: {best_result['name']} ({best_result['num_params']:,}p, acc={best_result['best_test_acc']:.4f})")
 
     # Phase 2: Multi-seed evaluation of virtual methods + winning baselines
@@ -286,7 +310,8 @@ def main():
         print(f"\n--- 1/{ratio} compression (M={budget:,}) ---")
 
         ratio_results = {"deephash": [], "hasharith": [], "sinusoidal": [], "baseline": []}
-        winner_name = best_baselines[ratio]["name"]
+        baseline_result, baseline_factory = best_baselines[ratio]
+        winner_name = baseline_result["name"]
 
         for seed in SEEDS:
             print(f"  Seed {seed}:")
@@ -312,19 +337,8 @@ def main():
             r = train_model(model, f"Sinusoidal", train_loader, test_loader, device, epochs, seed)
             ratio_results["sinusoidal"].append(r)
 
-            # Reconstruct winning baseline
-            if winner_name.startswith("MLP2T("):
-                parts = winner_name[6:-1].split(",")
-                model = MLP2Tapered(int(parts[0]), int(parts[1]))
-            elif winner_name.startswith("MLP2("):
-                h = int(winner_name.split("=")[1].rstrip(")"))
-                model = MLP2(h)
-            elif winner_name.startswith("MLP1("):
-                h = int(winner_name.split("=")[1].rstrip(")"))
-                model = MLP1(h)
-            else:
-                model = MLP1(1)  # fallback
-
+            # Reconstruct winning baseline from factory
+            model = baseline_factory()
             r = train_model(model, f"Best-Baseline", train_loader, test_loader, device, epochs, seed)
             ratio_results["baseline"].append(r)
 
@@ -338,8 +352,8 @@ def main():
     summary_rows = []
     for ratio in ratios:
         rr = all_results[ratio]
-        winner_name = best_baselines[ratio]["name"]
-        winner_params = best_baselines[ratio]["num_params"]
+        winner_name = best_baselines[ratio][0]["name"]
+        winner_params = best_baselines[ratio][0]["num_params"]
         budget = full_params // ratio
         print(f"\n  1/{ratio} compression | budget={budget:,} | baseline={winner_name} ({winner_params:,}p)")
         print(f"  {'Method':<20} {'Params':>8} {'Best Acc (mean +/- std)':>25} {'Last Acc (mean +/- std)':>25}")
@@ -348,10 +362,11 @@ def main():
         for method in ["deephash", "hasharith", "sinusoidal", "baseline"]:
             accs_best = [r["best_test_acc"] for r in rr[method]]
             accs_last = [r["last_test_acc"] for r in rr[method]]
-            mean_b = sum(accs_best) / len(accs_best)
-            std_b = (sum((a - mean_b)**2 for a in accs_best) / len(accs_best)) ** 0.5
-            mean_l = sum(accs_last) / len(accs_last)
-            std_l = (sum((a - mean_l)**2 for a in accs_last) / len(accs_last)) ** 0.5
+            n = len(accs_best)
+            mean_b = sum(accs_best) / n
+            std_b = (sum((a - mean_b)**2 for a in accs_best) / (n - 1)) ** 0.5 if n > 1 else 0.0
+            mean_l = sum(accs_last) / n
+            std_l = (sum((a - mean_l)**2 for a in accs_last) / (n - 1)) ** 0.5 if n > 1 else 0.0
             params = rr[method][0]["num_params"]
             label = method if method != "baseline" else f"baseline({winner_name})"
             print(f"  {label:<20} {params:>8,}  {mean_b:.4f} +/- {std_b:.4f}          {mean_l:.4f} +/- {std_l:.4f}")
@@ -378,7 +393,7 @@ def main():
     os.makedirs(results_dir, exist_ok=True)
     with open(os.path.join(results_dir, "extreme_compression_v2.json"), "w") as f:
         json.dump({
-            "baselines": {str(k): v for k, v in best_baselines.items()},
+            "baselines": {str(k): v[0] for k, v in best_baselines.items()},
             "summary": summary_rows,
             "seeds": SEEDS,
         }, f, indent=2)

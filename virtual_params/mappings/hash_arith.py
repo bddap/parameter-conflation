@@ -54,7 +54,6 @@ class HashArithMap(VirtualParameterMap):
         self._norm = math.sqrt(init_std ** 4 + init_std ** 2)
 
     def _get_cached(self, n_virtual: int, slot_id: int, device: torch.device):
-        key = (slot_id, n_virtual)
         cache_device_key = (slot_id, n_virtual, str(device))
 
         if cache_device_key not in self._cache:
@@ -84,6 +83,10 @@ class HashArithMap(VirtualParameterMap):
         virtual_flat = (a1 * a2 + a3) / self._norm
 
         return virtual_flat.reshape(shape)
+
+    def clear_cache(self) -> None:
+        """Free cached index tensors."""
+        self._cache.clear()
 
     def extra_repr(self) -> str:
         return f"num_actual={self.num_actual}, norm={self._norm:.4f}"

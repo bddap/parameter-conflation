@@ -87,5 +87,9 @@ class SinusoidalMap(VirtualParameterMap):
 
         return virtual_flat.reshape(shape)
 
+    def clear_cache(self) -> None:
+        """Free cached index and basis tensors."""
+        self._cache.clear()
+
     def extra_repr(self) -> str:
         return f"num_actual={self.num_actual}, num_terms={self.num_terms}"

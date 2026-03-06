@@ -3,6 +3,11 @@ Combined experiment runner for parameter conflation.
 
 Runs MNIST, CIFAR-10, and sequence modeling experiments with reduced
 epoch counts for CPU feasibility. Produces a unified results summary.
+
+NOTE: The sequence model here is a feedforward MLP (embed->flatten->hidden->output),
+NOT the GRU-based model in sequence.py. The dataset here predicts the next single
+character from a fixed context window. These are intentionally simpler for speed;
+sequence.py is the full GRU-based experiment.
 """
 
 import sys
@@ -429,14 +434,8 @@ def main():
     # Download tiny shakespeare
     text_path = os.path.join(data_dir, "shakespeare.txt")
     if not os.path.exists(text_path):
-        try:
-            url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-            urllib.request.urlretrieve(url, text_path)
-        except Exception:
-            text = ("to be or not to be that is the question "
-                    "whether tis nobler in the mind to suffer ") * 5000
-            with open(text_path, "w") as f:
-                f.write(text)
+        url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+        urllib.request.urlretrieve(url, text_path)
     with open(text_path, "r") as f:
         text = f.read()
 

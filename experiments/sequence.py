@@ -37,35 +37,26 @@ def count_params(model):
 # --- Dataset ---
 
 def get_text_data(data_dir):
-    """Download a small text corpus (Shakespeare) or generate one."""
+    """Download a small text corpus (Shakespeare)."""
     filepath = os.path.join(data_dir, "shakespeare.txt")
     if not os.path.exists(filepath):
         os.makedirs(data_dir, exist_ok=True)
         url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-        try:
-            urllib.request.urlretrieve(url, filepath)
-        except Exception:
-            # Fallback: generate repeating text
-            text = ("to be or not to be that is the question "
-                    "whether tis nobler in the mind to suffer "
-                    "the slings and arrows of outrageous fortune "
-                    "or to take arms against a sea of troubles ") * 5000
-            with open(filepath, "w") as f:
-                f.write(text)
+        urllib.request.urlretrieve(url, filepath)
     with open(filepath, "r") as f:
         return f.read()
 
 
 class CharDataset(Dataset):
-    def __init__(self, text, seq_len=64):
+    def __init__(self, data_tensor, seq_len=64):
+        """Character-level dataset from pre-encoded tensor.
+
+        Args:
+            data_tensor: LongTensor of character indices (encoded with a shared vocabulary)
+            seq_len: context window length
+        """
         self.seq_len = seq_len
-        # Build vocab
-        chars = sorted(set(text))
-        self.char2idx = {c: i for i, c in enumerate(chars)}
-        self.idx2char = {i: c for c, i in self.char2idx.items()}
-        self.vocab_size = len(chars)
-        # Encode
-        self.data = torch.tensor([self.char2idx[c] for c in text], dtype=torch.long)
+        self.data = data_tensor
 
     def __len__(self):
         return max(0, len(self.data) - self.seq_len - 1)
@@ -139,7 +130,7 @@ class VirtualCharModel(nn.Module):
         self.embedding = nn.Embedding(vocab_size, embed_dim)
         self.ih = VirtualLinear(vpm, embed_dim, 3 * hidden_dim, slot_id=0)
         self.hh = VirtualLinear(vpm, hidden_dim, 3 * hidden_dim, slot_id=100)
-        self.output_proj = VirtualLinear(vpm, hidden_dim, vocab_size, slot_id=200)
+        self.output_proj = VirtualLinear(vpm, hidden_dim, vocab_size, slot_id=200, gain=1.0)
 
     def forward(self, x):
         batch, seq_len = x.shape
@@ -264,13 +255,17 @@ def main():
     text = get_text_data(data_dir)
     print(f"Text length: {len(text):,} chars")
 
-    # Train/test split
-    split = int(len(text) * 0.9)
-    seq_len = 64
-    train_dataset = CharDataset(text[:split], seq_len=seq_len)
-    test_dataset = CharDataset(text[split:], seq_len=seq_len)
+    # Build shared vocabulary from full text, then encode and split
+    chars = sorted(set(text))
+    char2idx = {c: i for i, c in enumerate(chars)}
+    vocab_size = len(chars)
+    data_encoded = torch.tensor([char2idx[c] for c in text], dtype=torch.long)
 
-    vocab_size = train_dataset.vocab_size
+    split = int(len(data_encoded) * 0.9)
+    seq_len = 64
+    train_dataset = CharDataset(data_encoded[:split], seq_len=seq_len)
+    test_dataset = CharDataset(data_encoded[split:], seq_len=seq_len)
+
     print(f"Vocab size: {vocab_size}")
 
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=2)

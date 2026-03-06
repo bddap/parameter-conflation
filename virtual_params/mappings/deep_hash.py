@@ -88,5 +88,9 @@ class DeepHashMap(VirtualParameterMap):
 
         return virtual_flat.reshape(shape)
 
+    def clear_cache(self) -> None:
+        """Free cached index tensors."""
+        self._cache.clear()
+
     def extra_repr(self) -> str:
         return f"num_actual={self.num_actual}, norm={self._norm:.4f}"

@@ -61,7 +61,7 @@ class VirtualCNN(nn.Module):
         self.conv2 = VirtualConv2d(vpm, ch1, ch2, 3, padding=1, slot_id=100)
         self.conv3 = VirtualConv2d(vpm, ch2, ch3, 3, padding=1, slot_id=200)
         self.fc1 = VirtualLinear(vpm, 4 * 4 * ch3, fc_hidden, slot_id=300)
-        self.fc2 = VirtualLinear(vpm, fc_hidden, 10, slot_id=400)
+        self.fc2 = VirtualLinear(vpm, fc_hidden, 10, slot_id=400, gain=1.0)
 
     def forward(self, x):
         x = F.relu(self.conv1(x))
