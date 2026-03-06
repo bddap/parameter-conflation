@@ -59,9 +59,5 @@ class VirtualParameterMap(ABC, nn.Module):
         """Public API: materialize virtual params for a given slot."""
         return self._compute_virtual(shape, slot_id)
 
-    def clear_cache(self) -> None:
-        """Clear any cached index tensors. Subclasses with caches should override."""
-        pass
-
     def extra_repr(self) -> str:
         return f"num_actual={self.num_actual}"

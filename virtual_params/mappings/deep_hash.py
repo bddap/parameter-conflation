@@ -24,7 +24,7 @@ Properties:
 
 import torch
 import math
-from typing import Tuple, Dict
+from typing import Tuple
 from ..core import VirtualParameterMap
 
 
@@ -43,7 +43,6 @@ class DeepHashMap(VirtualParameterMap):
 
     def __init__(self, num_actual: int, init_std: float = 1.0):
         super().__init__(num_actual, init_std=init_std)
-        self._cache: Dict = {}
         # For init_std=s:
         # Var(level1) = s^4 + s^2
         # Var(level1_a * level1_b) = Var(level1)^2 = (s^4 + s^2)^2
@@ -51,26 +50,23 @@ class DeepHashMap(VirtualParameterMap):
         v1 = init_std**4 + init_std**2
         self._norm = math.sqrt(v1 * v1 + init_std**2)
 
-    def _get_cached(self, n_virtual: int, slot_id: int, device: torch.device):
-        cache_key = (slot_id, n_virtual, str(device))
-        if cache_key not in self._cache:
-            M = self.num_actual
-            gen = torch.Generator()
-            gen.manual_seed(slot_id * 1000003 + 13)
+    def _make_indices(self, n_virtual: int, slot_id: int, device: torch.device):
+        M = self.num_actual
+        gen = torch.Generator()
+        gen.manual_seed(slot_id * 1000003 + 13)
 
-            indices = []
-            for _ in range(7):
-                indices.append(torch.randint(0, M, (n_virtual,), generator=gen).to(device))
+        indices = []
+        for _ in range(7):
+            indices.append(torch.randint(0, M, (n_virtual,), generator=gen).to(device))
 
-            self._cache[cache_key] = tuple(indices)
-        return self._cache[cache_key]
+        return tuple(indices)
 
     def _compute_virtual(self, shape: Tuple[int, ...], slot_id: int) -> torch.Tensor:
         n_virtual = 1
         for s in shape:
             n_virtual *= s
 
-        h1, h2, h3, h4, h5, h6, h7 = self._get_cached(
+        h1, h2, h3, h4, h5, h6, h7 = self._make_indices(
             n_virtual, slot_id, self.actual_params.device
         )
 
@@ -87,10 +83,6 @@ class DeepHashMap(VirtualParameterMap):
         virtual_flat = (t1 * t2 + a7) / self._norm
 
         return virtual_flat.reshape(shape)
-
-    def clear_cache(self) -> None:
-        """Free cached index tensors."""
-        self._cache.clear()
 
     def extra_repr(self) -> str:
         return f"num_actual={self.num_actual}, norm={self._norm:.4f}"

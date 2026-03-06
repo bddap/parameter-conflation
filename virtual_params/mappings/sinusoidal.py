@@ -22,7 +22,7 @@ Properties:
 
 import torch
 import math
-from typing import Tuple, Dict
+from typing import Tuple
 from ..core import VirtualParameterMap
 
 
@@ -30,8 +30,8 @@ class SinusoidalMap(VirtualParameterMap):
     """
     Fourier-basis parameter conflation.
 
-    Caches hash indices, frequencies, phases, and normalized basis values
-    per (slot_id, shape) so they are only generated once.
+    Generates hash indices, frequencies, phases, and normalized basis values
+    fresh each forward pass. Deterministic for a given (slot_id, shape).
 
     Args:
         num_actual: number of actual (stored) parameters
@@ -42,42 +42,37 @@ class SinusoidalMap(VirtualParameterMap):
     def __init__(self, num_actual: int, num_terms: int = 8, init_std: float = 1.0):
         super().__init__(num_actual, init_std)
         self.num_terms = min(num_terms, num_actual)
-        self._cache: Dict = {}
 
-    def _get_cached(self, n_virtual: int, slot_id: int, device: torch.device):
-        cache_device_key = (slot_id, n_virtual, str(device))
-        if cache_device_key not in self._cache:
-            K = self.num_terms
-            M = self.num_actual
+    def _make_indices_and_basis(self, n_virtual: int, slot_id: int, device: torch.device):
+        K = self.num_terms
+        M = self.num_actual
 
-            gen = torch.Generator()
-            gen.manual_seed(slot_id * 1000003 + 42)
+        gen = torch.Generator()
+        gen.manual_seed(slot_id * 1000003 + 42)
 
-            indices = torch.randint(0, M, (K, n_virtual), generator=gen)
+        indices = torch.randint(0, M, (K, n_virtual), generator=gen)
 
-            omegas = torch.rand(K, generator=gen)
-            omegas = 0.5 + omegas * 10.0
-            phis = torch.rand(K, generator=gen) * (2.0 * math.pi)
+        omegas = torch.rand(K, generator=gen)
+        omegas = 0.5 + omegas * 10.0
+        phis = torch.rand(K, generator=gen) * (2.0 * math.pi)
 
-            positions = torch.arange(n_virtual, dtype=torch.float32)
-            angles = omegas.unsqueeze(1) * positions.unsqueeze(0) + phis.unsqueeze(1)
-            basis = torch.sin(angles)  # [K, n_virtual]
+        positions = torch.arange(n_virtual, dtype=torch.float32)
+        angles = omegas.unsqueeze(1) * positions.unsqueeze(0) + phis.unsqueeze(1)
+        basis = torch.sin(angles)  # [K, n_virtual]
 
-            # Per-position normalization: make sum_k(basis[k,j]^2) = 1
-            # so that Var[virtual[j]] = Var[actual] (when actual params are independent)
-            basis_norm = basis.norm(dim=0, keepdim=True).clamp(min=1e-8)  # [1, n_virtual]
-            basis = basis / basis_norm  # [K, n_virtual], each column has unit L2 norm
+        # Per-position normalization: make sum_k(basis[k,j]^2) = 1
+        # so that Var[virtual[j]] = Var[actual] (when actual params are independent)
+        basis_norm = basis.norm(dim=0, keepdim=True).clamp(min=1e-8)  # [1, n_virtual]
+        basis = basis / basis_norm  # [K, n_virtual], each column has unit L2 norm
 
-            self._cache[cache_device_key] = (indices.to(device), basis.to(device))
-
-        return self._cache[cache_device_key]
+        return indices.to(device), basis.to(device)
 
     def _compute_virtual(self, shape: Tuple[int, ...], slot_id: int) -> torch.Tensor:
         n_virtual = 1
         for s in shape:
             n_virtual *= s
 
-        indices, basis = self._get_cached(n_virtual, slot_id, self.actual_params.device)
+        indices, basis = self._make_indices_and_basis(n_virtual, slot_id, self.actual_params.device)
 
         # Gather actual params: [K, n_virtual]
         selected = self.actual_params[indices]
@@ -86,10 +81,6 @@ class SinusoidalMap(VirtualParameterMap):
         virtual_flat = (selected * basis).sum(dim=0)
 
         return virtual_flat.reshape(shape)
-
-    def clear_cache(self) -> None:
-        """Free cached index and basis tensors."""
-        self._cache.clear()
 
     def extra_repr(self) -> str:
         return f"num_actual={self.num_actual}, num_terms={self.num_terms}"

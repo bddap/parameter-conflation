@@ -27,7 +27,7 @@ Properties:
 
 import torch
 import math
-from typing import Tuple, Dict
+from typing import Tuple
 from ..core import VirtualParameterMap
 
 
@@ -39,8 +39,6 @@ class HashArithMap(VirtualParameterMap):
     and computes: actual[h1] * actual[h2] + actual[h3], normalized to
     approximately unit variance.
 
-    Caches hash indices per (slot_id, n_virtual) for speed.
-
     Args:
         num_actual: number of actual (stored) parameters
         init_std: initialization std for actual params (default 1.0)
@@ -48,33 +46,25 @@ class HashArithMap(VirtualParameterMap):
 
     def __init__(self, num_actual: int, init_std: float = 1.0):
         super().__init__(num_actual, init_std=init_std)
-        self._cache: Dict = {}
         # Normalization factor: for init_std=s, Var = s^4 + s^2
         # We store it so it's fixed at init (doesn't track training drift)
         self._norm = math.sqrt(init_std ** 4 + init_std ** 2)
 
-    def _get_cached(self, n_virtual: int, slot_id: int, device: torch.device):
-        cache_device_key = (slot_id, n_virtual, str(device))
-
-        if cache_device_key not in self._cache:
-            M = self.num_actual
-            gen = torch.Generator()
-            gen.manual_seed(slot_id * 1000003 + 7)
-
-            h1 = torch.randint(0, M, (n_virtual,), generator=gen).to(device)
-            h2 = torch.randint(0, M, (n_virtual,), generator=gen).to(device)
-            h3 = torch.randint(0, M, (n_virtual,), generator=gen).to(device)
-
-            self._cache[cache_device_key] = (h1, h2, h3)
-
-        return self._cache[cache_device_key]
+    def _make_indices(self, n_virtual: int, slot_id: int, device: torch.device):
+        M = self.num_actual
+        gen = torch.Generator()
+        gen.manual_seed(slot_id * 1000003 + 7)
+        h1 = torch.randint(0, M, (n_virtual,), generator=gen).to(device)
+        h2 = torch.randint(0, M, (n_virtual,), generator=gen).to(device)
+        h3 = torch.randint(0, M, (n_virtual,), generator=gen).to(device)
+        return h1, h2, h3
 
     def _compute_virtual(self, shape: Tuple[int, ...], slot_id: int) -> torch.Tensor:
         n_virtual = 1
         for s in shape:
             n_virtual *= s
 
-        h1, h2, h3 = self._get_cached(n_virtual, slot_id, self.actual_params.device)
+        h1, h2, h3 = self._make_indices(n_virtual, slot_id, self.actual_params.device)
 
         a1 = self.actual_params[h1]
         a2 = self.actual_params[h2]
@@ -83,10 +73,6 @@ class HashArithMap(VirtualParameterMap):
         virtual_flat = (a1 * a2 + a3) / self._norm
 
         return virtual_flat.reshape(shape)
-
-    def clear_cache(self) -> None:
-        """Free cached index tensors."""
-        self._cache.clear()
 
     def extra_repr(self) -> str:
         return f"num_actual={self.num_actual}, norm={self._norm:.4f}"
