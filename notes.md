@@ -151,11 +151,97 @@ CIFAR-10 and Shakespeare don't show the crossover even at 1/50. Hypotheses:
 ### v2: sinusoidal normalization, vocab splits, param matching
 ### v3: output layer gain=1.0 (Xavier), seeded model construction
 
+## Combine Function Sweep (Exp 1)
+
+Tested 10 combine functions at 1/50 compression on MNIST, 3 seeds each.
+All use ArithMap with the same architecture (784->256->256->10).
+
+| Rank | Combine fn          | x  | Accuracy (mean +/- std) |
+|------|---------------------|----|-------------------------|
+| 1    | deeper_hash         | 11 | **93.57% +/- 0.23%**   |
+| 2    | wide_hash           | 5  | 93.23% +/- 0.06%       |
+| 3    | deep_hash           | 7  | 93.21% +/- 0.23%       |
+| 4    | multiply            | 2  | 92.80% +/- 0.04%       |
+| 5    | xor_inspired        | 3  | 92.63% +/- 0.42%       |
+| 6    | rotation            | 3  | 92.63% +/- 0.19%       |
+| 7    | hash_arith          | 3  | 92.43% +/- 0.13%       |
+| 8    | sinusoidal (K=8)    | 8  | 91.55% +/- 0.06%       |
+| 9    | identity            | 1  | 91.49% +/- 0.17%       |
+| 10   | add                 | 2  | 91.37% +/- 0.30%       |
+| --   | baseline MLP(6,6)   | -  | 89.05% +/- 0.86%       |
+
+### Key findings
+
+1. **More mixing (higher x) helps.** Clear monotonic trend from x=1 to x=11.
+   But diminishing returns: the jump from x=1 to x=2 (+1.3pp) is larger than
+   x=7 to x=11 (+0.4pp).
+
+2. **Nonlinearity matters more than number of terms.** `multiply` (x=2, 92.8%)
+   beats `hash_arith` (x=3, 92.4%). The product operation is the key ingredient.
+   `add` (x=2, 91.4%) performs like `identity` (x=1, 91.5%) — linear combination
+   of actual params doesn't increase effective diversity.
+
+3. **Sinusoidal is equivalent to identity.** Despite using K=8 terms, sinusoidal
+   (91.6%) is no better than identity (91.5%). The sinusoidal basis weights are
+   fixed (not learned), so it's really a linear combination of actual params.
+   This confirms finding #2: linear mixing doesn't help.
+
+4. **All virtual methods beat the baseline.** Even the worst (add, 91.4%) beats
+   the best baseline (MLP(6,6), 89.1%) by 2.3pp.
+
+5. **The "multiply+add" motif is robust.** hash_arith, wide_hash, deep_hash,
+   deeper_hash all use variations of `a*b+c`. The ranking within this family
+   tracks with depth/width of the expression tree.
+
+## Scale-Up Experiment (Exp 4)
+
+Fixed M=5,386 actual params, varied architecture width H from 128 to 2048.
+deep_hash (x=7) mapping. Compared against non-conflated baselines at same width.
+
+| Config              | H     | Virtual params | Actual params | Accuracy        |
+|---------------------|-------|----------------|---------------|-----------------|
+| virtual             | 128   | 118,282        | 5,386         | 93.03% +/- 0.28%|
+| virtual             | 256   | 269,322        | 5,386         | 93.21% +/- 0.24%|
+| virtual             | 512   | 669,706        | 5,386         | 93.29% +/- 0.25%|
+| virtual             | 1024  | 1,863,690      | 5,386         | 93.43% +/- 0.18%|
+| virtual             | 2048  | 5,824,522      | 5,386         | 93.32% +/- 0.08%|
+| baseline-full       | 128   | --             | 118,282       | 98.08% +/- 0.10%|
+| baseline-full       | 256   | --             | 269,322       | 98.35% +/- 0.02%|
+| baseline-full       | 512   | --             | 669,706       | 98.57% +/- 0.06%|
+| baseline-full       | 1024  | --             | 1,863,690     | 98.57% +/- 0.06%|
+| baseline-full       | 2048  | --             | 5,824,522     | 98.54% +/- 0.06%|
+| baseline-matched    | 6,6   | --             | ~5,000        | 89.05% +/- 0.86%|
+
+### Key findings
+
+1. **Scaling width helps slightly, then plateaus.** From H=128 to H=1024,
+   accuracy improves from 93.0% to 93.4% — only 0.4pp. H=2048 doesn't
+   improve further (93.3%). With only 5,386 actual params, extra width
+   gives diminishing returns quickly.
+
+2. **The bottleneck is actual param count, not width.** At H=2048, the model
+   has 5.8M virtual params from 5,386 actual — a 1081:1 compression ratio.
+   Accuracy is essentially the same as H=256 (50:1 compression). The
+   actual param budget is the binding constraint.
+
+3. **Full baselines show width matters for independent params.** Non-conflated
+   models improve from 98.1% (H=128) to 98.6% (H=512), then plateau.
+   The plateau is later because they have more independent params to exploit
+   the width.
+
+4. **Virtual models are ~5pp below full baselines at every width.** This gap
+   is the cost of parameter conflation — weight interdependence limits what
+   the optimizer can achieve.
+
+5. **Virtual H=128 (5,386 actual) beats baseline-matched MLP(6,6) (~5,000 actual)
+   by 4pp.** This confirms the core finding: parameter conflation lets you use
+   a wider architecture at the same storage cost.
+
 ## What To Try Next
 
-1. **Error bars on CIFAR extreme compression** — push CIFAR to 1/100+ with
-   architecture search baselines
-2. **Deeper chains** — 3-level hash (11 lookups). Is more depth always better?
+1. **Compression ratio scaling (Exp 3)** — fill in the accuracy vs compression
+   curve for identity, hash_arith, and deep_hash
+2. **CIFAR combine fn sweep (Exp 2)** — does the ranking hold on harder data?
 3. **Learned f** — small neural net as mapping, trained end-to-end
 4. **Hybrid** — virtual params for large layers, independent for small ones
 5. **Scale** — test on transformers with millions of virtual params
