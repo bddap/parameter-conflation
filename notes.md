@@ -303,9 +303,71 @@ Tested at 1/50 compression. CNN architecture: Conv(32)->Conv(64)->FC(256)->FC(10
    identity despite 8 terms. Linear combination is truly no better than
    raw repetition.
 
+## Compression Ratio Scaling on CIFAR-10 (Exp 5)
+
+CNN architecture: Conv(32)->Conv(64)->FC(256)->FC(10). 3 seeds each.
+
+| Ratio | identity (x=1) | deep_hash (x=7) | baseline            |
+|-------|----------------|------------------|---------------------|
+| 1/4   | 50.08 +/- 0.57 | 55.32 +/- 1.02   | **73.12 +/- 0.44**  |
+| 1/10  | 46.93 +/- 0.47 | 51.42 +/- 0.53   | **70.11 +/- 1.22**  |
+| 1/25  | 44.58 +/- 0.91 | 48.60 +/- 0.46   | **66.71 +/- 0.49**  |
+| 1/50  | 42.72 +/- 0.55 | 46.47 +/- 0.34   | **61.56 +/- 0.62**  |
+| 1/100 | 37.50 +/- 2.48 | 42.79 +/- 1.04   | **54.31 +/- 1.39**  |
+
+### Key findings
+
+1. **No crossover on CIFAR up to 1/100.** Baseline wins at every ratio tested.
+   Even at 1/100, the baseline CNN(4,8,32) with 54.3% beats deep_hash's 42.8%.
+   CIFAR requires more weight independence than MNIST.
+
+2. **Baseline degrades gracefully on CIFAR.** Unlike MNIST where baselines
+   cliff-dive at 1/100, CIFAR baselines degrade smoothly (73% -> 54% from
+   1/4 to 1/100). This is because CNN architectures can be shrunk more
+   gracefully (reduce channel counts) than MLPs (reduce hidden width).
+
+3. **deep_hash advantage over identity is consistent.** ~5pp gap at every
+   ratio, confirming that nonlinear mixing helps on CIFAR too.
+
+4. **Virtual models plateau faster.** From 1/4 to 1/100, virtual deep_hash
+   drops 12.5pp (55.3 -> 42.8) while baseline drops 18.8pp (73.1 -> 54.3).
+   Virtual models degrade more slowly, but start from a lower base.
+
+## Summary of All Experiments
+
+### The story so far
+
+Parameter conflation works by decoupling architecture width from stored param
+count. The technique shines when:
+- **Compression is extreme** (>25x on MNIST)
+- **Traditional architectures collapse** due to width bottleneck
+- **The mapping uses multiplicative nonlinearity** (deeper is better)
+
+It struggles when:
+- **Moderate compression** (<25x) — independent params win
+- **Harder tasks** (CIFAR) — weight matrices need higher effective rank
+- **Linear mixing** — sinusoidal and additive maps are no better than identity
+
+### Combine function ranking (consistent across MNIST and CIFAR)
+
+```
+deeper_hash (x=11) > deep_hash (x=7) ~ wide_hash (x=5) > multiply (x=2)
+> hash_arith (x=3) > rotation (x=3) ~ xor (x=3)
+> identity (x=1) ~ add (x=2) ~ sinusoidal (K=8)
+```
+
+The key variable is **number of multiplicative interactions**, not just number
+of terms. Linear combinations don't help at all.
+
+### Scaling up (virtual > normal)
+
+Extra width beyond ~256 provides diminishing returns when actual params are
+fixed (~5K). The bottleneck is actual param count, not architecture width.
+Virtual H=2048 (1081:1 compression) performs the same as H=256 (50:1).
+
 ## What To Try Next
 
-1. **CIFAR compression scaling (Exp 5)** — find the crossover point for CIFAR
-2. **Learned f** — small neural net as mapping, trained end-to-end
-3. **Hybrid** — virtual params for large layers, independent for small ones
-4. **Scale** — test on transformers with millions of virtual params
+1. **Learned f** — small neural net as mapping, trained end-to-end
+2. **Hybrid** — virtual params for large layers, independent for small ones
+3. **Scale** — test on transformers with millions of virtual params
+4. **Find CIFAR crossover** — push to 1/500+ or use smaller base architecture
