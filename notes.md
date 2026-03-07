@@ -237,11 +237,75 @@ deep_hash (x=7) mapping. Compared against non-conflated baselines at same width.
    by 4pp.** This confirms the core finding: parameter conflation lets you use
    a wider architecture at the same storage cost.
 
+## Compression Ratio Scaling (Exp 3)
+
+Accuracy vs compression ratio on MNIST for identity, hash_arith, deep_hash,
+and best baseline. 3 seeds each. Architecture: 784->256->256->10.
+
+| Ratio | identity (x=1) | hash_arith (x=3) | deep_hash (x=7) | baseline       |
+|-------|----------------|-------------------|------------------|----------------|
+| 1/4   | 95.38 +/- 0.13 | 95.99 +/- 0.08    | 96.56 +/- 0.11   | **97.83 +/- 0.02** |
+| 1/10  | 94.42 +/- 0.10 | 94.84 +/- 0.10    | 95.67 +/- 0.06   | **96.71 +/- 0.19** |
+| 1/25  | 93.01 +/- 0.14 | 93.56 +/- 0.02    | 94.21 +/- 0.20   | **94.38 +/- 0.15** |
+| 1/50  | 91.49 +/- 0.17 | 92.44 +/- 0.13    | **93.21 +/- 0.23** | 89.05 +/- 0.86 |
+| 1/100 | 89.61 +/- 0.16 | 90.68 +/- 0.29    | **91.61 +/- 0.15** | 52.74 +/- 21.87|
+| 1/200 | 87.16 +/- 0.82 | 88.23 +/- 0.46    | **89.32 +/- 0.37** | 27.31 +/- 0.77 |
+| 1/500 | 80.36 +/- 0.97 | 82.30 +/- 0.82    | **84.36 +/- 0.15** | 27.31 +/- 0.77 |
+
+### Key findings
+
+1. **Crossover at ~1/25 to 1/50.** At 1/25 the baseline (94.4%) still narrowly
+   beats deep_hash (94.2%). By 1/50, deep_hash (93.2%) clearly wins over the
+   baseline (89.1%). The crossover point is where the baseline architecture
+   becomes too narrow to function.
+
+2. **Graceful degradation.** Virtual models lose ~2pp per doubling of compression
+   ratio. The curve is smooth — no cliff. Even at 1/500, deep_hash (84.4%) is
+   far above chance (10%) and well above the collapsed baseline (27.3%).
+
+3. **deep_hash advantage grows with compression.** The gap between deep_hash and
+   identity is 1.2pp at 1/4 but 4.0pp at 1/500. Nonlinear mixing becomes more
+   important as the actual param pool shrinks.
+
+4. **Baselines collapse sharply.** Between 1/50 and 1/100, baselines drop from
+   89% to 53% — a cliff caused by architecture width falling below the minimum
+   for the task. Virtual models have no such cliff.
+
+## Combine Function Sweep on CIFAR-10 (Exp 2)
+
+Tested at 1/50 compression. CNN architecture: Conv(32)->Conv(64)->FC(256)->FC(10).
+
+| Rank | Combine fn          | x  | Accuracy (mean +/- std) |
+|------|---------------------|----|-------------------------|
+| 1    | deeper_hash         | 11 | 47.68% +/- 0.73%       |
+| 2    | deep_hash           | 7  | 46.48% +/- 0.34%       |
+| 3    | multiply            | 2  | 45.69% +/- 1.15%       |
+| 4    | hash_arith          | 3  | 45.16% +/- 0.90%       |
+| 5    | sinusoidal (K=8)    | 8  | 42.77% +/- 0.65%       |
+| 6    | identity (x=1)      | 1  | 42.71% +/- 0.55%       |
+| --   | baseline CNN(32,8,32)| - | **61.56% +/- 0.62%**   |
+
+### Key findings
+
+1. **Same ranking as MNIST.** deeper_hash > deep_hash > multiply > hash_arith >
+   sinusoidal ~ identity. The combine_fn ranking is task-independent.
+
+2. **Baseline wins decisively on CIFAR at 1/50.** 61.6% vs 47.7% for the best
+   virtual model. CIFAR requires more independent parameters — the higher-rank
+   weight matrices needed for image features can't be well-approximated by
+   conflated params at this ratio.
+
+3. **Nonlinearity gap is larger on CIFAR.** deeper_hash (47.7%) beats identity
+   (42.7%) by 5pp — vs 2pp on MNIST. Harder tasks benefit more from richer
+   mixing.
+
+4. **Sinusoidal confirms the linear mixing finding.** Again performs like
+   identity despite 8 terms. Linear combination is truly no better than
+   raw repetition.
+
 ## What To Try Next
 
-1. **Compression ratio scaling (Exp 3)** — fill in the accuracy vs compression
-   curve for identity, hash_arith, and deep_hash
-2. **CIFAR combine fn sweep (Exp 2)** — does the ranking hold on harder data?
-3. **Learned f** — small neural net as mapping, trained end-to-end
-4. **Hybrid** — virtual params for large layers, independent for small ones
-5. **Scale** — test on transformers with millions of virtual params
+1. **CIFAR compression scaling (Exp 5)** — find the crossover point for CIFAR
+2. **Learned f** — small neural net as mapping, trained end-to-end
+3. **Hybrid** — virtual params for large layers, independent for small ones
+4. **Scale** — test on transformers with millions of virtual params
